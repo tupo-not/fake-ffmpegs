@@ -1,0 +1,125 @@
+#!/usr/bin/env python3
+LOG_WRAPPER = "/tmp/ffmpeg-wrapper.log"
+import gi
+
+gi.require_version('Gst', '1.0')
+from gi.repository import Gst, GLib
+Gst.init(None)
+pipeline = Gst.Pipeline.new("fake_ffmpeg")
+
+pic_src = Gst.ElementFactory.make("multifilesrc", "pic_src")
+jpegdec = Gst.ElementFactory.make("jpegdec", "jpegdec")
+videoconvertscale = Gst.ElementFactory.make("videoconvertscale", "videoconvertscale")
+capsfilter = Gst.ElementFactory.make("capsfilter", "capsfilter")
+vaapih264enc = Gst.ElementFactory.make("vaapih264enc", "vaapih264enc")
+h264parse = Gst.ElementFactory.make("h264parse", "h264parse")
+mp4mux = Gst.ElementFactory.make("mp4mux", "mp4mux")
+mp4sink = Gst.ElementFactory.make("filesink", "mp4sink")
+wav_src = Gst.ElementFactory.make("filesrc", "wav_src")
+wavparse = Gst.ElementFactory.make("wavparse", "wavparse")
+audioconvert = Gst.ElementFactory.make("audioconvert", "audioconvert")
+audioresample = Gst.ElementFactory.make("audioresample", "audioresample")
+aac_enc = Gst.ElementFactory.make("avenc_aac", "aac_enc")
+
+capsfilter.set_property("caps", Gst.Caps.from_string("video/x-raw,format=NV12"))
+mp4mux.set_property("faststart", True)
+
+pipeline.add(pic_src)
+pipeline.add(jpegdec)
+pipeline.add(videoconvertscale)
+pipeline.add(capsfilter)
+pipeline.add(vaapih264enc)
+pipeline.add(h264parse)
+pipeline.add(mp4mux)
+pipeline.add(mp4sink)
+
+pipeline.add(wav_src)
+pipeline.add(audioconvert)
+pipeline.add(audioresample)
+pipeline.add(wavparse)
+pipeline.add(aac_enc)
+
+pic_src.link(jpegdec)
+jpegdec.link(videoconvertscale)
+videoconvertscale.link(capsfilter)
+capsfilter.link(vaapih264enc)
+vaapih264enc.link(h264parse)
+h264parse.link(mp4mux)
+mp4mux.link(mp4sink)
+
+wav_src.link(wavparse)
+wavparse.link(audioconvert)
+audioconvert.link(audioresample)
+audioresample.link(aac_enc)
+aac_enc.link(mp4mux)
+
+from os import getenv
+def log(msg: str):
+    with open(LOG_WRAPPER, "a") as f:
+        f.write(msg + "\n")
+
+def fix_path(arg: str) -> str:
+    if len(arg) > 2 and arg[1] == ":" and arg[0].isalpha():
+        drive = arg[0].lower()
+        path = arg[2:].replace("\\", "/").replace("Users", "users")
+        return f"/home/{getenv('USER')}/.wine/drive_{drive}/{path.lstrip('/')}"
+    return arg
+
+from sys import argv
+from sys import exit
+raw = argv[1:]
+if not raw:
+    exit(0)
+
+argv = [fix_path(a) for a in raw]
+from shlex import split as ssplit
+from shlex import quote as qquote
+log(f"raw args: {' '.join(qquote(a) for a in argv)}")
+fps = ssplit(' '.join(qquote(a) for a in argv))
+fps = fps[fps.index('-r') + 1]
+pic_src.set_property("caps", Gst.Caps.from_string(f"image/jpeg,framerate={fps}/1"))
+
+for a in argv:
+    la = a.lower()
+    if la.endswith(".wav"):
+        wav_path = a
+    elif la.endswith(".mp4"):
+        out_path = a
+log(f"\n\n\nwav_path:{wav_path}\nout_path:{out_path}\nframes path:{wav_path[:-4]}/\nlog file:{out_path[:-4]}..mp4.log\nfps:{fps}\n\n\n")
+pic_src.set_property("location", f"{wav_path[:-4]}/%d.jpg")
+from subprocess import run as rrun
+from subprocess import PIPE as PPIPE
+from subprocess import STDOUT as SSTDOUT
+p = rrun(["ffmpeg","-hide_banner","-i", wav_path,"-ar", "48000","-ac", "2","-sample_fmt", "s16",f"{wav_path}.wav"], stdout=PPIPE, stderr=SSTDOUT, text=True)
+log(p.stdout)
+print(p.stdout)
+wav_src.set_property("location", f"{wav_path}.wav")
+mp4sink.set_property("location", out_path)
+bus = pipeline.get_bus()
+bus.add_signal_watch()
+
+def on_message(bus, message, loop):
+    t = message.type
+    if t == Gst.MessageType.EOS:
+        try:
+            from shutil import rmtree
+            from os import remove
+            rmtree(wav_path[:-4], ignore_errors=True)
+            remove(wav_path)
+            remove(f"{wav_path}.wav")
+            remove(f"{out_path[:-4]} {wav_path[-12:-4]}..mp4.log")
+        except Exception as e:
+            with open(LOG_WRAPPER, "a") as f:
+                print(e, file=f)
+        log("Pipeline finished")
+        loop.quit()
+    elif t == Gst.MessageType.ERROR:
+        err, dbg = message.parse_error()
+        log(f"ERROR: {err}, {dbg}")
+        loop.quit()
+    return True
+loop = GLib.MainLoop()
+bus.connect("message", on_message, loop)
+pipeline.set_state(Gst.State.PLAYING)
+loop.run()
+exit(0)
