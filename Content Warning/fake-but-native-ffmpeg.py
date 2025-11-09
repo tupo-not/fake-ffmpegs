@@ -126,7 +126,6 @@ while True:
     loop.run()
 
     try:
-        system(f"cp {out_path} /home/tupo-nain/Desktop/out.mp4 -f")
         conn.sendall(b"now u can crash UwU")
         log("sent 'DONE'")
         from shutil import rmtree
